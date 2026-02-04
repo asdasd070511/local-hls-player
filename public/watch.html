@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>播放</title>
+
+  <!-- Plyr（美化控制列） -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/plyr/3.8.3/plyr.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/plyr/3.8.3/plyr.min.js"></script>
+
+  <style>
+    :root{
+      font-family: system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif;
+      --bg:#0b0b0c;
+      --card: rgba(255,255,255,.05);
+      --border: rgba(255,255,255,.10);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.65);
+      --link:#9ad;
+
+      /* Plyr 主色 */
+      --plyr-color-main: #4aa3ff;
+
+      /* 影片顯示模式（contain / cover） */
+      --fit-mode: contain;
+    }
+
+    body{ margin:0; background:var(--bg); color:var(--text); }
+    a{ color:var(--link); text-decoration:none; }
+
+    header{
+      position: sticky; top: 0; z-index: 5;
+      padding: 12px;
+      background: rgba(11,11,12,.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+
+    .row{
+      display:flex; gap:10px; align-items:center; justify-content:space-between;
+      flex-wrap: wrap;
+    }
+
+    .wrap{
+      padding: 12px;
+      display: grid;
+      gap: 12px;
+      max-width: 980px;
+      margin: 0 auto;
+    }
+
+    .title{
+      font-size: 14px;
+      color: var(--muted);
+      word-break: break-all;
+      margin-top: 6px;
+    }
+
+    .card{
+      border: 1px solid var(--border);
+      background: var(--card);
+      border-radius: 16px;
+      overflow: visible;
+    }
+
+    /* 播放器外框（不要裁控制列） */
+    .playerBox{ padding: 10px; }
+
+    .videoShell{
+      width: 100%;
+      max-height: min(52vh, 480px);
+      aspect-ratio: 16/9;
+      background: #000;
+      border-radius: 14px;
+      overflow: visible; /* 重要：不裁控制列 */
+    }
+
+    /* 裁影片本體即可 */
+    .plyr{
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    /* 真正控制填滿/完整的地方（Plyr 外層） */
+    .plyr__video-wrapper video{
+      object-fit: var(--fit-mode, contain);
+      background:#000;
+    }
+
+    .meta{
+      padding: 10px 12px;
+      border-top: 1px solid rgba(255,255,255,.08);
+      display: grid;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .pill{
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.85);
+    }
+
+    .btn{
+      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.92);
+      cursor: pointer;
+    }
+
+    .navBtns{
+      display:flex; gap:8px; align-items:center;
+    }
+  </style>
+</head>
+
+<body>
+<header>
+  <div class="row">
+    <div class="navBtns">
+      <a href="#" id="backBtn">← 返回</a>
+      <button class="btn" id="prevBtn">⏮ 上一部</button>
+      <button class="btn" id="nextBtn">下一部 ⏭</button>
+    </div>
+    <button class="btn" id="fitBtn">切換顯示</button>
+  </div>
+  <div class="title" id="title">載入中…</div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="playerBox">
+      <div class="videoShell">
+        <video id="v" controls playsinline preload="metadata"></video>
+      </div>
+    </div>
+    <div class="meta">
+      <div class="row">
+        <span class="pill" id="mode">偵測中…</span>
+        <span class="pill" id="status">準備中…</span>
+      </div>
+      <div id="path"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const id = params.get("id");
+
+  const v = document.getElementById("v");
+  const titleEl = document.getElementById("title");
+  const pathEl = document.getElementById("path");
+  const modeEl = document.getElementById("mode");
+  const statusEl = document.getElementById("status");
+
+  const prevBtn = document.getElementById("prevBtn");
+  const nextBtn = document.getElementById("nextBtn");
+  const fitBtn  = document.getElementById("fitBtn");
+
+  let prepareTick = 0;
+  let prepareTimer = null;
+  
+  if (!id) {
+    statusEl.textContent = "缺少影片 id";
+    throw new Error("missing id");
+  }
+
+  /* ========= 顯示模式切換（真正有效） ========= */
+  let fit = "contain";
+  fitBtn.addEventListener("click", () => {
+    fit = (fit === "contain") ? "cover" : "contain";
+    document.documentElement.style.setProperty("--fit-mode", fit);
+    statusEl.textContent = `顯示模式：${fit === "contain" ? "完整" : "填滿"}`;
+  });
+
+  /* ========= API ========= */
+  async function getVideoInfo(id){
+    const r = await fetch("/api/video/" + encodeURIComponent(id));
+    if (!r.ok) throw new Error("video not found");
+    return await r.json();
+  }
+
+  async function waitForM3u8(m3u8Url){
+  prepareTick = 0;
+  prepareTimer = setInterval(() => {
+    const dots = ".".repeat((prepareTick++ % 3) + 1);
+    statusEl.textContent = "正在準備串流" + dots;
+  }, 500);
+
+  try {
+    while (true) {
+      const r = await fetch(m3u8Url, { redirect: "manual" });
+
+      // 202：後端表示「ffmpeg 已啟動但還沒好」
+      if (r.status === 202) {
+        await new Promise(s => setTimeout(s, 900));
+        continue;
+      }
+
+      // 200 / 206 都視為 OK
+      if (r.ok) {
+        // ⭐⭐ 關鍵：永遠回傳 API URL
+        return m3u8Url;
+      }
+
+      throw new Error("HLS failed: " + r.status);
+    }
+  } finally {
+    clearInterval(prepareTimer);
+    prepareTimer = null;
+  }
+}
+
+
+
+  /* ========= Plyr ========= */
+  function initPlyr(){
+    return new Plyr(v, {
+      controls: [
+        'play-large','play','progress','current-time','duration',
+        'mute','volume','settings','pip','airplay','fullscreen'
+      ],
+      settings: ['speed'],
+      speed: { selected: 1, options: [0.5,0.75,1,1.25,1.5,2] }
+    });
+  }
+
+  /* ========= 上一部 / 下一部（同資料夾） ========= */
+  let siblings = [];
+  let currentIndex = -1;
+  const AUTO_PLAY_NEXT = true;
+
+  async function loadSiblings(relPath){
+    const dir = relPath.split("/").slice(0,-1).join("/");
+    const r = await fetch("/api/browse?dir=" + encodeURIComponent(dir));
+    const data = await r.json();
+
+    siblings = (data.videos || []).sort((a,b) =>
+      a.name.localeCompare(b.name, "zh-Hant")
+    );
+
+    currentIndex = siblings.findIndex(v => v.id === id);
+    updateNavBtns();
+  }
+
+  function updateNavBtns(){
+    prevBtn.disabled = (currentIndex <= 0);
+    nextBtn.disabled = (currentIndex < 0 || currentIndex >= siblings.length - 1);
+  }
+
+  function goTo(index){
+	  if (index < 0 || index >= siblings.length) return;
+
+	  const url = "/watch.html?id=" + encodeURIComponent(siblings[index].id);
+
+	  // ✅ 關鍵：只替換當前 history，不新增一筆
+	  history.replaceState(null, "", url);
+
+	  // 重新載入播放頁內容
+	  location.reload();
+  }
+
+  prevBtn.addEventListener("click", () => goTo(currentIndex - 1));
+  nextBtn.addEventListener("click", () => goTo(currentIndex + 1));
+
+  // 鍵盤快捷鍵
+  window.addEventListener("keydown", (e) => {
+    if (e.target && ["INPUT","TEXTAREA"].includes(e.target.tagName)) return;
+    if (e.key === "ArrowLeft")  goTo(currentIndex - 1);
+    if (e.key === "ArrowRight") goTo(currentIndex + 1);
+  });
+
+  /* ========= 主流程 ========= */
+  (async () => {
+    const info = await getVideoInfo(id);
+    titleEl.textContent = info.name;
+    pathEl.textContent = info.relPath;
+
+    await loadSiblings(info.relPath);
+
+    const finalUrl = await waitForM3u8(info.hlsUrl);
+
+    initPlyr();
+
+    // Chrome / Android
+    if (window.Hls && Hls.isSupported()) {
+      modeEl.textContent = "HLS.js（Chrome/Android）";
+      const hls = new Hls({
+        maxBufferLength: 20,
+        maxMaxBufferLength: 60,
+        backBufferLength: 30,
+      });
+      hls.loadSource(finalUrl);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        statusEl.textContent = "已就緒";
+        v.play().catch(()=>{});
+      });
+      return;
+    }
+
+    // iOS Safari
+    if (v.canPlayType("application/vnd.apple.mpegurl") !== "") {
+      modeEl.textContent = "原生 HLS（iOS Safari）";
+      v.src = finalUrl;
+      statusEl.textContent = "已就緒";
+      v.play().catch(()=>{});
+      return;
+    }
+	
+	// ✅ 播放結束自動播下一部
+	v.addEventListener("ended", () => {
+	  if (!AUTO_PLAY_NEXT) return;
+	  if (currentIndex >= 0 && currentIndex < siblings.length - 1) {
+		goTo(currentIndex + 1);
+	  }
+	});
+
+    modeEl.textContent = "不支援";
+    statusEl.textContent = "此瀏覽器不支援 HLS";
+  })().catch(e => {
+    statusEl.textContent = String(e);
+  });
+  
+  // ✅ 返回列表並恢復捲動位置
+	const backBtn = document.getElementById("backBtn");
+	backBtn.addEventListener("click", (e) => {
+	  e.preventDefault();
+	  // 設一個 flag，讓列表頁知道要恢復 scroll
+	  sessionStorage.setItem("restoreScroll", "1");
+	  history.back();
+	});
+</script>
+</body>
+</html>

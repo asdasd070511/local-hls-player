@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>本地影片庫</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+    body{margin:0;background:#0b0b0c;color:#f2f2f2}
+    header{position:sticky;top:0;padding:12px;background:rgba(11,11,12,.92);backdrop-filter:blur(10px);border-bottom:1px solid rgba(255,255,255,.08);z-index:2}
+    .row{display:flex;gap:8px;align-items:center}
+    input{flex:1;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#fff;outline:none}
+    .crumb{margin-top:8px;font-size:12px;color:rgba(255,255,255,.7);line-height:1.3}
+    .crumb a{color:#9ad;text-decoration:none}
+    main{padding:12px;display:grid;gap:12px}
+
+    .sectionTitle{font-size:13px;color:rgba(255,255,255,.7);margin:2px 2px 0}
+
+    .grid{display:grid;grid-template-columns:repeat(1,minmax(0,1fr));gap:10px}
+    .card{border-radius:16px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);overflow:hidden}
+    .cardInner{padding:12px}
+    .name{font-size:14px}
+    .path{font-size:12px;color:rgba(255,255,255,.6);margin-top:4px}
+
+    .folderRow{display:flex;justify-content:space-between;align-items:center;gap:10px}
+    .folderBtn{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;text-decoration:none;white-space:nowrap}
+
+    .videoRow{display:grid;grid-template-columns:140px 1fr;gap:10px}
+    .thumb{width:100%;aspect-ratio:16/9;background:#000;display:block;object-fit:cover}
+    .playBtn{margin-top:10px;display:inline-block;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;text-decoration:none}
+    @media (min-width: 800px){
+      .grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <input id="q" placeholder="在目前資料夾搜尋…" />
+  </div>
+  <div class="crumb" id="crumb"></div>
+</header>
+
+<main>
+  <div>
+    <div class="sectionTitle">資料夾</div>
+    <div id="folders" class="grid"></div>
+  </div>
+
+  <div>
+    <div class="sectionTitle">影片</div>
+    <div id="videos" class="grid"></div>
+  </div>
+</main>
+
+<script>
+  const q = document.getElementById("q");
+  const foldersEl = document.getElementById("folders");
+  const videosEl = document.getElementById("videos");
+  const crumbEl = document.getElementById("crumb");
+  
+  // ✅ 若從播放頁返回，恢復捲動位置
+  const RESTORE_KEY = "listScrollY";
+
+  let tmr = null;
+
+  function escapeHtml(s){
+    return (s||"").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+
+  function getDirFromUrl(){
+    const p = new URLSearchParams(location.search);
+    return (p.get("dir") || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  }
+
+  function setDirToUrl(dir){
+    const p = new URLSearchParams(location.search);
+    if (dir) p.set("dir", dir);
+    else p.delete("dir");
+    history.pushState(null, "", "?" + p.toString());
+  }
+
+  function buildCrumb(dir){
+    const parts = dir ? dir.split("/") : [];
+    let html = `<a href="#" data-dir="">根目錄</a>`;
+    let acc = "";
+    for (const part of parts) {
+      acc = acc ? acc + "/" + part : part;
+      html += ` / <a href="#" data-dir="${escapeHtml(acc)}">${escapeHtml(part)}</a>`;
+    }
+    crumbEl.innerHTML = html;
+
+    crumbEl.querySelectorAll("a[data-dir]").forEach(a => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const d = a.getAttribute("data-dir") || "";
+        setDirToUrl(d);
+        load();
+      });
+    });
+  }
+
+  async function load(){
+    const dir = getDirFromUrl();
+    buildCrumb(dir);
+
+    const r = await fetch("/api/browse?dir=" + encodeURIComponent(dir));
+    const data = await r.json();
+
+    const query = q.value.trim().toLowerCase();
+
+    // folders
+    const folders = (data.folders || []).filter(f => !query || f.name.toLowerCase().includes(query) || f.relPath.toLowerCase().includes(query));
+    foldersEl.innerHTML = folders.map(f => `
+      <div class="card">
+        <div class="cardInner folderRow">
+          <div>
+            <div class="name">📁 ${escapeHtml(f.name)}</div>
+            <div class="path">${escapeHtml(f.relPath)}</div>
+          </div>
+          <a class="folderBtn" href="?dir=${encodeURIComponent(f.relPath)}">進入</a>
+        </div>
+      </div>
+    `).join("") || `<div class="card"><div class="cardInner">（無子資料夾）</div></div>`;
+
+    // videos
+    const videos = (data.videos || []).filter(v => !query || v.name.toLowerCase().includes(query) || v.relPath.toLowerCase().includes(query));
+    videosEl.innerHTML = videos.map(v => `
+      <div class="card">
+        <div class="videoRow">
+          <img class="thumb" loading="lazy" src="/api/thumb/${encodeURIComponent(v.id)}.jpg" alt="">
+          <div class="cardInner">
+            <div class="name">${escapeHtml(v.name)}</div>
+            <div class="path">${escapeHtml(v.relPath)}</div>
+            <a class="playBtn" href="/watch.html?id=${encodeURIComponent(v.id)}">播放</a>
+          </div>
+        </div>
+      </div>
+    `).join("") || `<div class="card"><div class="cardInner">（此資料夾沒有影片）</div></div>`;
+  }
+  
+  document.querySelectorAll('a.playBtn').forEach(a => {
+  a.addEventListener("click", () => {
+    sessionStorage.setItem(RESTORE_KEY, String(window.scrollY));
+	});
+  });
+
+
+  q.addEventListener("input", () => {
+    clearTimeout(tmr);
+    tmr = setTimeout(load, 150);
+  });
+
+  window.addEventListener("popstate", load);
+
+  load();
+  
+  if (sessionStorage.getItem("restoreScroll") === "1") {
+	  const y = parseInt(sessionStorage.getItem(RESTORE_KEY) || "0", 10);
+	  requestAnimationFrame(() => window.scrollTo(0, y));
+	  sessionStorage.removeItem("restoreScroll");
+  }
+
+
+</script>
+</body>
+</html>
